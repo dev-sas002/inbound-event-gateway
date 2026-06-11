@@ -116,6 +116,23 @@ class TestWithAProfile:
         response = normalizer.normalize(AWKWARD_PAYLOAD, vendor="Novacarrier")
         assert response.normalized.confidence_score < 0.7
 
+    def test_a_mapping_the_entity_type_cannot_take_is_ignored(self, normalizer):
+        # The admin edits status_map as raw JSON with no validation. A shipment
+        # word mapped onto an invoice status used to fail the schema on every
+        # webhook from this vendor; it now falls through to the gate instead.
+        VendorProfileRepository.save(NOVACARRIER)
+        VendorProfile.objects.filter(vendor="Novacarrier").update(
+            status_map={"handed_to_courier": "PAID"}
+        )
+        from apps.normalization.vendors import invalidate
+
+        invalidate("Novacarrier")
+        response = normalizer.normalize(AWKWARD_PAYLOAD, vendor="Novacarrier")
+
+        assert response.normalized.entity_type == EntityType.SHIPMENT
+        assert response.normalized.canonical_status != "PAID"
+        assert response.normalized.confidence_score < 0.7
+
 
 class TestResolution:
     def test_an_edit_takes_effect_rather_than_serving_a_stale_cache(self):

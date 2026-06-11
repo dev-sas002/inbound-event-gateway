@@ -33,7 +33,7 @@ from typing import Any
 from apps.normalization.backends.base import NormalizationResponse
 from apps.normalization.exceptions import NormalizationError
 from apps.normalization.models import EntityType, InvoiceStatus, ShipmentStatus
-from apps.normalization.schemas import NormalizationResult
+from apps.normalization.schemas import NormalizationResult, allowed_statuses
 from apps.normalization.vendors import VendorProfileSpec, profile_for
 
 logger = logging.getLogger("apps.normalization")
@@ -346,12 +346,21 @@ class RuleBasedNormalizer:
         if raw is None:
             return default, 0.25
 
-        key = status_token(raw)
         # The vendor's own vocabulary first: a profile is a recorded statement
         # about what this sender's words mean, and it outranks the generic
-        # table, which only knows what words usually mean.
-        if profile and key in profile.status_map:
-            return profile.status_map[key], PROFILE_CONFIDENCE
+        # table, which only knows what words usually mean. Only the mappings
+        # this entity type can take, though: profiles edited in the admin are
+        # not validated, and a shipment word mapped onto PAID would otherwise
+        # fail the schema on every webhook instead of falling back to a review.
+        allowed = allowed_statuses(entity_type)
+        vendor_map = (
+            {token: value for token, value in profile.status_map.items() if value in allowed}
+            if profile
+            else {}
+        )
+        key = status_token(raw)
+        if key in vendor_map:
+            return vendor_map[key], PROFILE_CONFIDENCE
         if key in table:
             return table[key], 0.9
         # Vendors namespace their event names: "invoice.payment_succeeded",
@@ -362,8 +371,8 @@ class RuleBasedNormalizer:
         parts = key.split("_")
         for start in range(1, len(parts)):
             suffix = "_".join(parts[start:])
-            if profile and suffix in profile.status_map:
-                return profile.status_map[suffix], PROFILE_CONFIDENCE
+            if suffix in vendor_map:
+                return vendor_map[suffix], PROFILE_CONFIDENCE
             if suffix in table:
                 # Slightly lower than an exact match: the prefix was discarded
                 # unread, so there is marginally more inference involved.
