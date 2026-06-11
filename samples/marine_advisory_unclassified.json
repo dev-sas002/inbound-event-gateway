@@ -1,0 +1,8 @@
+{
+  "vendor": "MarineAdvisoryFeed",
+  "id": "MAR-ALERT-7781",
+  "title": "Port congestion warning",
+  "body": "Weather disruptions expected in regional corridor.",
+  "published_at": "2026-04-20T08:00:00+00:00",
+  "severity": "medium"
+}
