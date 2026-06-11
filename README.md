@@ -22,10 +22,11 @@ docker compose up --build
 This starts PostgreSQL, Redis, the web process and two Celery workers (one per queue), runs
 migrations, creates a `demo` / `demo-password` admin login and seeds 24 webhooks from four
 vendors. Web is on `:8100` (admin at `/admin/`, OpenAPI at `/api/docs/`, liveness at
-`/api/health/`), PostgreSQL on `:8101`, Redis on `:8102`. Without Docker, against local services:
+`/api/health/`), PostgreSQL on `:8101`, Redis on `:8102`. Without Docker, on Python 3.12
+(`.python-version`) and against local services:
 
 ```bash
-uv sync --extra dev
+uv sync --locked --extra dev
 export POSTGRES_HOST=localhost REDIS_URL=redis://localhost:6379/0 CACHE_URL=redis://localhost:6379/2
 python manage.py migrate && python manage.py seed_demo && python manage.py runserver 8100
 celery -A config worker --queues normalization,normalization.bulk --loglevel INFO
@@ -35,13 +36,14 @@ celery -A config worker --queues normalization,normalization.bulk --loglevel INF
 
 ## One webhook, end to end
 
-Output from a local run with no API key set (`-H 'Content-Type: application/json'` omitted). A
-delivery in a vocabulary the normaliser knows goes straight to entity state:
+Captured from a fresh `docker compose up` with no API key set (`-H 'Content-Type:
+application/json'` omitted). A delivery in a vocabulary the normaliser knows goes straight to
+entity state:
 
 ```console
 $ curl -sX POST :8100/api/webhooks/ -H 'X-Webhook-Vendor: Maersk' -H 'Idempotency-Key: MRSK-EVT-2026-000911' \
     -d '{"container_no":"MAEU240498799","event_description":"delivered","event_time":"2026-09-26T10:15:00+00:00"}'
-{"status":"accepted","webhook_id":"04178bb0-6b69-4405-af1d-4cf837865707"}
+{"status":"accepted","webhook_id":"d0de0d0d-d902-40e0-b90e-9522d5c60a57"}
 $ curl -s ':8100/api/entities/state/?entity_type=SHIPMENT&entity_id=MAEU240498799'
 {"entity_type":"SHIPMENT","entity_id":"MAEU240498799","latest_status":"DELIVERED","latest_event_time":"2026-09-26T10:15:00Z","latest_event_id":25}
 ```
@@ -62,7 +64,7 @@ $ grep normalization_held_for_review worker.log
 $ curl -sX POST :8100/api/normalization/review-queue/26/ -d '{"decision":"approve"}'
 {"id":26,"decision":"approve","entity_state_updated":true}
 $ curl -sX POST :8100/api/normalization/review-queue/26/ -d '{"decision":"reject"}'
-{"detail":"event 26 was already reviewed at 2026-10-24 11:24:47.188358+00:00"}   # HTTP 409
+{"detail":"event 26 was already reviewed at 2026-11-07 18:29:25.906767+00:00"}   # HTTP 409
 ```
 
 ## Architecture
@@ -104,7 +106,11 @@ sequenceDiagram
 Three Django apps split the tables: `apps/ingestion` owns `RawWebhook` (signatures, idempotency,
 routing, replay), `apps/normalization` owns `NormalizedEvent` and `VendorProfile` (backends, the
 gate in `review.py`, discovery, calibration), and `apps/entities` owns `EntityState`, one row per
-`(entity_type, entity_id)` pointing at the event that set it. A normalised event's lifecycle:
+`(entity_type, entity_id)` pointing at the event that set it:
+
+![Entity states in the admin, one row per shipment or invoice](docs/screenshots/entity-state.png)
+
+A normalised event's lifecycle:
 
 ```mermaid
 stateDiagram-v2
@@ -119,7 +125,7 @@ stateDiagram-v2
     Rejected --> [*]: EntityState untouched
 ```
 
-![A held invoice event in the admin, confidence 0.3, source status "partially remitted"](docs/screenshots/review-console.png)
+![A held invoice event in the admin, confidence 0.3, source status "settled in full"](docs/screenshots/review-console.png)
 *A held event in the admin: the reading, the fields found and the vendor's original status text.*
 
 ## Design decisions
@@ -128,7 +134,8 @@ stateDiagram-v2
 later means downstream consumers act on a status nobody checked; holding costs operator time and
 latency. The worker calls `apply_confidence_gate()`; the review API and the admin's bulk
 approve/reject actions both call `apply_review_decision()`, so the paths share one rule. A
-decision is final (`409` on a second one) so the audit trail matches what happened.
+decision is final (`409` on a second one) so the audit trail matches what happened, and it is
+checked under a row lock so two reviewers acting at once cannot both win.
 
 **Score by the weakest signal.** The rule backend scores entity type,
 status and timestamp separately and takes the minimum. An average would let a confidently
@@ -138,13 +145,16 @@ pins the exact-threshold case so it cannot flip to `<=` unnoticed.
 **Teach the vendor rather than review it forever.** `POST /api/normalization/vendor-profiles/discover/`
 takes a handful of sample payloads and proposes where the id, status and timestamp live, plus a
 status map. It runs statistically with no key; with a key, a model's proposal is merged on top,
-but every path it suggests must exist in the samples and every status must be canonical.
-Phrases it cannot map are reported, never invented:
+but every path it suggests must exist in the samples and every status must be canonical; a
+malformed reply falls back to the statistical reading. Phrases it cannot map are reported, never
+invented:
 
 ```console
 {"method":"statistical","sample_count":4,"unmapped_statuses":["cargo_released_to_consignee"],
- "profile":{"vendor":"Ocean Network Express","id_paths":["shipment_reference"],
-   "status_map":{"delivered":"DELIVERED","in_transit":"IN_TRANSIT"}},"persisted":true}
+ "warnings":[],"profile":{"vendor":"Ocean Network Express","entity_type":"SHIPMENT",
+   "id_paths":["shipment_reference"],"status_paths":["status_text"],"time_paths":["occurred_at"],
+   "status_map":{"delivered":"DELIVERED","in_transit":"IN_TRANSIT"},"source":"DISCOVERED",
+   "sample_count":4,"notes":""},"persisted":true}
 ```
 
 A person adds the missing word (`PUT /vendor-profiles/{vendor}/` or the admin) and replays the
@@ -184,7 +194,7 @@ is down routing falls back to the default queue.
 |---|---|
 | `POST /api/webhooks/` | Ingest. `202`; `400` for a non-object payload; `401` for a bad signature |
 | `POST /api/webhooks/{id}/replay/` | Re-run a stored payload. `409` while in flight unless `{"force": true}` |
-| `GET /api/entities/state/?entity_type=&entity_id=` | Current status of one entity |
+| `GET /api/entities/state/?entity_type=&entity_id=` | Current status of one entity (type in any case) |
 | `GET /api/normalization/review-queue/` | Held, undecided events. `?vendor=&limit=&offset=` |
 | `POST /api/normalization/review-queue/{id}/` | `{"decision": "approve"}` or `"reject"`; `409` if decided |
 | `GET /api/normalization/low-confidence/` | All events under a threshold, whatever the gate did |
@@ -192,20 +202,26 @@ is down routing falls back to the default queue.
 | `GET/PUT/DELETE /api/normalization/vendor-profiles/{vendor}/` | Vendor profile CRUD (list at `/vendor-profiles/`) |
 | `POST /api/normalization/vendor-profiles/discover/` | Propose a profile from samples |
 
+![Swagger UI at /api/docs/ listing the endpoints](docs/screenshots/api-docs.png)
+
 `manage.py calibration_report` prints the calibration table. It can show the threshold is too
 high (approvals piling up below it) but cannot show it is too low: events above it are never reviewed.
 
 ## Testing
 
+With the compose stack running:
+
 ```bash
-POSTGRES_HOST=localhost python -m pytest -q   # 270 passed
-ruff check . && ruff format --check .
+docker compose exec web python -m pytest      # 282 passed
+docker compose exec web sh -c 'ruff check . && ruff format --check .'
 ```
 
-It needs a real PostgreSQL (`SELECT ... FOR UPDATE`, a partial index) and makes no network calls:
-the OpenAI client is mocked and an autouse fixture clears `OPENAI_API_KEY`. Tests focus on the gate
+Outside Docker, `POSTGRES_HOST=localhost python -m pytest` does the same. The suite needs a real
+PostgreSQL (`SELECT ... FOR UPDATE`, a partial index) and makes no network calls: the OpenAI
+client is mocked and an autouse fixture clears `OPENAI_API_KEY`. Tests focus on the gate
 boundary, the retry ladder ending in `DEAD_LETTER`, redelivery by header, event id and hash, forged
-signatures, out-of-order events, routing, discovery and calibration.
+signatures, out-of-order events, routing, discovery and calibration, and on what a model can get
+wrong: a NaN confidence, a reply that is not an object, a status map that crosses entity types.
 
 ## Limitations and next steps
 
@@ -215,3 +231,7 @@ signatures, out-of-order events, routing, discovery and calibration.
 - **Per-type thresholds.** One threshold covers every vendor and entity type; invoices probably deserve a higher bar.
 - **Fair scheduling.** The bulk lane is a bulkhead only, and without `CACHE_URL` each gunicorn worker counts separately.
 - **Dead-letter triage.** Dead-lettered webhooks are replayable one at a time; there is no bulk requeue.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
