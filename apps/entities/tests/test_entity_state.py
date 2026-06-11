@@ -119,6 +119,18 @@ class TestTheStateEndpoint:
             "latest_event_id": event.id,
         }
 
+    def test_the_entity_type_is_matched_case_insensitively(self, client, make_event):
+        event = make_event(entity_id="S8", canonical_status="DELIVERED", event_time=LATER)
+        EntityStateRepository.upsert_if_newer(event)
+
+        response = client.get(self.url(entity_type="shipment", entity_id="S8"))
+
+        assert response.status_code == 200
+        assert response.json()["latest_event_id"] == event.id
+
+    def test_a_blank_parameter_counts_as_missing(self, client):
+        assert client.get(self.url(entity_type="%20", entity_id="S")).status_code == 400
+
     def test_an_unknown_entity_is_a_404(self, client):
         response = client.get(self.url(entity_type="SHIPMENT", entity_id="NOPE"))
         assert response.status_code == 404

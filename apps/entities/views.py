@@ -37,8 +37,10 @@ class EntityStateView(APIView):
         responses={200: EntityStateSerializer},
     )
     def get(self, request, *args, **kwargs):
-        entity_type = request.query_params.get("entity_type")
-        entity_id = request.query_params.get("entity_id")
+        # Entity types are stored upper case (SHIPMENT, INVOICE); entity ids are
+        # vendor identifiers and stay exactly as sent.
+        entity_type = (request.query_params.get("entity_type") or "").strip().upper()
+        entity_id = (request.query_params.get("entity_id") or "").strip()
         if not entity_type or not entity_id:
             return Response(
                 {"detail": "entity_type and entity_id are required query params."},
