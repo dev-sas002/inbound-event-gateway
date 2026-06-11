@@ -25,11 +25,13 @@ WORKDIR /app
 # Dependencies are installed from the lock file before the source is copied, so
 # editing a Python file does not invalidate this layer. The lock file is used
 # rather than re-resolving, so an image built today installs the versions the
-# project was tested against.
+# project was tested against. --locked fails the build if pyproject.toml and
+# uv.lock disagree; without it uv quietly re-resolved, which is how the lock
+# went stale without anyone noticing.
 COPY pyproject.toml uv.lock README.md ./
 # Dev dependencies are included so the suite can be run inside the image:
 # `docker compose exec web python -m pytest`.
-RUN uv sync --no-install-project --extra dev
+RUN uv sync --locked --no-install-project --extra dev
 
 # ---------------------------------------------------------------------------
 # Runtime stage: the interpreter, the virtualenv, the source, and nothing else.
