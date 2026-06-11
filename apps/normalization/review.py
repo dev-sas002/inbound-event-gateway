@@ -103,21 +103,31 @@ def apply_review_decision(
     """
     if decision not in VALID_DECISIONS:
         raise ValueError(f'decision must be one of {VALID_DECISIONS}, got "{decision}"')
-    if event.reviewed_at is not None:
-        raise AlreadyDecided(f"event {event.id} was already reviewed at {event.reviewed_at}")
 
     updated = False
     with transaction.atomic():
+        # The check has to read the row under a lock, not the caller's copy.
+        # Two reviewers loading the queue at once each hold an instance with
+        # reviewed_at unset, and checking those let both decisions through:
+        # an approve and a reject on one event, with entity state promoted.
+        locked = NormalizedEvent.objects.select_for_update().get(pk=event.pk)
+        if locked.reviewed_at is not None:
+            raise AlreadyDecided(f"event {event.id} was already reviewed at {locked.reviewed_at}")
+
         if decision == APPROVE:
-            EntityStateRepository.upsert_if_newer(event)
+            EntityStateRepository.upsert_if_newer(locked)
             updated = True
-        event.reviewed_at = timezone.now()
-        event.review_decision = decision
+        locked.reviewed_at = timezone.now()
+        locked.review_decision = decision
         note = f"{decision}d by {actor}"
-        event.review_reason = (f"{event.review_reason} | {note}" if event.review_reason else note)[
-            :_MAX_REVIEW_REASON
-        ]
-        event.save(update_fields=["reviewed_at", "review_decision", "review_reason"])
+        locked.review_reason = (
+            f"{locked.review_reason} | {note}" if locked.review_reason else note
+        )[:_MAX_REVIEW_REASON]
+        locked.save(update_fields=["reviewed_at", "review_decision", "review_reason"])
+
+    event.reviewed_at = locked.reviewed_at
+    event.review_decision = locked.review_decision
+    event.review_reason = locked.review_reason
 
     logger.info(
         "review_decision_recorded",

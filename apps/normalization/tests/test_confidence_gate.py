@@ -169,6 +169,34 @@ class TestDecisions:
         with pytest.raises(AlreadyDecided):
             apply_review_decision(event, "reject")
 
+    def test_a_stale_copy_cannot_decide_a_settled_event(self):
+        # Two reviewers load the same held event; each copy says undecided.
+        event = make_event(confidence=0.30, entity_id="RACE")
+        event.requires_review = True
+        event.save()
+        first_reviewer = NormalizedEvent.objects.get(pk=event.pk)
+        second_reviewer = NormalizedEvent.objects.get(pk=event.pk)
+
+        apply_review_decision(first_reviewer, "reject", actor="alice")
+
+        with pytest.raises(AlreadyDecided):
+            apply_review_decision(second_reviewer, "approve", actor="bob")
+        event.refresh_from_db()
+        assert event.review_decision == "reject"
+        assert "approved" not in event.review_reason
+        assert not EntityState.objects.filter(entity_id="RACE").exists()
+
+    def test_the_callers_instance_reflects_the_decision(self):
+        event = make_event(confidence=0.30, entity_id="ECHO")
+        event.requires_review = True
+        event.save()
+
+        apply_review_decision(event, "approve", actor="alice")
+
+        assert event.reviewed_at is not None
+        assert event.review_decision == "approve"
+        assert event.review_reason.endswith("approved by alice")
+
     def test_deciding_on_an_event_that_was_never_held_is_a_404(self, client):
         event = make_event(confidence=0.95, entity_id="NEVER-HELD")
 
