@@ -345,7 +345,10 @@ def _ask_model(vendor: str, samples: list[dict[str, Any]], client) -> dict[str, 
             {"role": "user", "content": prompt},
         ],
     )
-    return json.loads(completion.choices[0].message.content or "{}")
+    proposal = json.loads(completion.choices[0].message.content or "{}")
+    if not isinstance(proposal, dict):
+        raise ValueError(f"expected a JSON object, got {type(proposal).__name__}")
+    return proposal
 
 
 def _merge_model_proposal(
@@ -362,7 +365,12 @@ def _merge_model_proposal(
     warnings = list(base.warnings)
 
     def keep_paths(raw: Any, existing: tuple[str, ...]) -> tuple[str, ...]:
-        proposed = [str(path) for path in raw or [] if isinstance(path, (str, int))]
+        # A bare string is one path, not a sequence of one-letter paths.
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raw = []
+        proposed = [str(path) for path in raw if isinstance(path, (str, int))]
         valid = [path for path in proposed if path in known_paths]
         dropped = len(proposed) - len(valid)
         if dropped:
@@ -377,9 +385,24 @@ def _merge_model_proposal(
         entity_type = base.profile.entity_type
 
     allowed = _canonical_values(entity_type)
-    status_map = dict(base.profile.status_map)
+    # The statistical mappings were made for the statistical entity type. If
+    # the model changed the type, a mapping such as delivered -> DELIVERED is
+    # no longer a status this entity can take, and keeping it would fail
+    # validation on every webhook the profile reads. Those words go back to a
+    # person.
+    status_map = {}
     unmapped = set(base.unmapped_statuses)
-    for token, canonical in (proposal.get("status_map") or {}).items():
+    for token, canonical in base.profile.status_map.items():
+        if canonical in allowed:
+            status_map[token] = canonical
+        else:
+            unmapped.add(token)
+
+    proposed_map = proposal.get("status_map") or {}
+    if not isinstance(proposed_map, dict):
+        warnings.append("ignored status_map from the model: not a JSON object")
+        proposed_map = {}
+    for token, canonical in proposed_map.items():
         if canonical is None:
             continue
         token, canonical = status_token(token), str(canonical).upper()

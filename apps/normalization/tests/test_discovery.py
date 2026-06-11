@@ -182,6 +182,56 @@ class TestModelAssistedDiscovery:
 
         assert "handed_to_courier" in result.unmapped_statuses
 
+    def test_a_reply_that_is_not_an_object_falls_back(self, with_key):
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [MagicMock()]
+        client.chat.completions.create.return_value.choices[0].message.content = '["SHIPMENT"]'
+        with patch("openai.OpenAI", return_value=client):
+            result = discover_profile("Novacarrier", samples())
+
+        assert result.method == STATISTICAL
+        assert any("model-assisted discovery failed" in w for w in result.warnings)
+
+    def test_malformed_fields_in_the_proposal_are_ignored(self, with_key):
+        client = model_returning(
+            {
+                "entity_type": "SHIPMENT",
+                # A bare string, not a list: one path, not eleven letters.
+                "id_paths": "consignment.ref",
+                "status_paths": {"not": "a list"},
+                "time_paths": None,
+                "status_map": ["handed_to_courier", "OUT_FOR_DELIVERY"],
+            }
+        )
+        with patch("openai.OpenAI", return_value=client):
+            result = discover_profile("Novacarrier", samples())
+
+        assert result.method == MODEL_ASSISTED
+        assert result.profile.id_paths[0] == "consignment.ref"
+        assert "c" not in result.profile.id_paths
+        assert result.profile.status_map["in_transit"] == "IN_TRANSIT"
+        assert any("status_map" in warning for warning in result.warnings)
+
+    def test_a_changed_entity_type_drops_mappings_it_cannot_take(self, with_key):
+        # The statistical pass reads these as shipments and maps in_transit.
+        # If the model says invoice, IN_TRANSIT is not an invoice status and
+        # must not be written into the profile.
+        client = model_returning(
+            {
+                "entity_type": "INVOICE",
+                "id_paths": [],
+                "status_paths": [],
+                "time_paths": [],
+                "status_map": {},
+            }
+        )
+        with patch("openai.OpenAI", return_value=client):
+            result = discover_profile("Novacarrier", samples())
+
+        assert result.profile.entity_type == EntityType.INVOICE.value
+        assert "in_transit" not in result.profile.status_map
+        assert "in_transit" in result.unmapped_statuses
+
     def test_a_model_failure_falls_back_to_the_statistical_reading(self, with_key):
         client = MagicMock()
         client.chat.completions.create.side_effect = RuntimeError("rate limited")
