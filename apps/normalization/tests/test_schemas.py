@@ -11,6 +11,7 @@ is much harder to see.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC
 
 import pytest
@@ -72,6 +73,9 @@ class TestRefusedInput:
             ("event_time", "last Tuesday"),
             ("confidence_score", 1.5),
             ("confidence_score", -0.1),
+            ("confidence_score", float("nan")),
+            ("confidence_score", float("inf")),
+            ("confidence_score", "NaN"),
             ("normalized_payload", "not an object"),
         ],
     )
@@ -106,3 +110,11 @@ class TestRefusedInput:
 
         with pytest.raises((KeyError, ValueError)):
             NormalizationResult.from_dict(data)
+
+    def test_a_nan_confidence_from_raw_model_json_is_refused(self):
+        # The OpenAI backend parses the model's reply with json.loads, which
+        # turns a bare NaN token into float("nan") rather than failing.
+        parsed = json.loads(json.dumps(VALID).replace("0.9", "NaN"))
+
+        with pytest.raises(ValueError):
+            NormalizationResult.from_dict(parsed)

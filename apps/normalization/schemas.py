@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -47,7 +48,10 @@ class NormalizationResult:
             raise ValueError("event_time must include timezone")
 
         confidence_score = float(data["confidence_score"])
-        if confidence_score < 0.0 or confidence_score > 1.0:
+        # json.loads accepts NaN and Infinity, and NaN fails every comparison:
+        # it slipped past this range check and then past the gate's
+        # `confidence < threshold`, so a NaN reading was trusted outright.
+        if not math.isfinite(confidence_score) or not 0.0 <= confidence_score <= 1.0:
             raise ValueError("confidence_score must be between 0 and 1")
 
         normalized_payload_raw = data.get("normalized_payload") or {}
