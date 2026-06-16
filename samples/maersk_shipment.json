@@ -1,0 +1,10 @@
+{
+  "vendor": "Maersk",
+  "event_id": "MRSK-EVT-2026-000132",
+  "container_no": "MAEU240498712",
+  "vessel": "MAERSK SELETAR",
+  "voyage": "436W",
+  "event_description": "Loaded onboard and sailed",
+  "event_time": "2026-04-21T22:47:00+08:00",
+  "location": "SGSIN"
+}

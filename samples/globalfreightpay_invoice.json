@@ -1,0 +1,9 @@
+{
+  "vendor": "GlobalFreightPay",
+  "id": "GFP-INV-1008291-EVT-2",
+  "invoice_number": "GFP-INV-1008291",
+  "message": "settled in full",
+  "timestamp": "2026-04-27T09:20:00+00:00",
+  "amount": "5420.00",
+  "currency": "USD"
+}
