@@ -1,0 +1,23 @@
+.git
+.gitignore
+.github
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv
+# Local virtualenvs must never be copied into the image: they are the
+# host's interpreter and would shadow the one installed in the container.
+project_venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+staticfiles
+docs
+README.preview.html
+*.sqlite3
+*.log
