@@ -1,0 +1,126 @@
+name: webhook-ingestion
+
+# One command, no manual steps:
+#   docker compose up --build
+# Then http://localhost:8100/api/docs/ — the database is migrated and seeded
+# with four vendors' worth of traffic before the web process starts serving.
+
+x-app-env: &app-env
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-only-insecure-key-change-in-any-real-deployment}
+  DEBUG: ${DEBUG:-0}
+  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+  POSTGRES_DB: ${POSTGRES_DB:-webhooks}
+  POSTGRES_USER: ${POSTGRES_USER:-webhooks}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-webhooks}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  # Shared across web and workers, so a profile edited in the admin is seen by
+  # every worker rather than only by the process that made the change.
+  CACHE_URL: redis://redis:6379/2
+  # Unset by default -> the rule-based normaliser runs and the whole
+  # pipeline works without a billable key.
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  NORMALIZATION_BACKEND: ${NORMALIZATION_BACKEND:-auto}
+  LOW_CONFIDENCE_THRESHOLD: ${LOW_CONFIDENCE_THRESHOLD:-0.7}
+  NOISY_VENDOR_BURST: ${NOISY_VENDOR_BURST:-200}
+  NOISY_VENDOR_WINDOW_SECONDS: ${NOISY_VENDOR_WINDOW_SECONDS:-60}
+  # vendor=secret pairs; empty means no signature is required.
+  WEBHOOK_SIGNING_SECRETS: ${WEBHOOK_SIGNING_SECRETS:-}
+  WEBHOOK_REQUIRE_SIGNATURE: ${WEBHOOK_REQUIRE_SIGNATURE:-False}
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: webhook_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-webhooks}
+      POSTGRES_USER: ${POSTGRES_USER:-webhooks}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-webhooks}
+    ports:
+      - "8101:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-webhooks} -d ${POSTGRES_DB:-webhooks}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: webhook_redis
+    ports:
+      - "8102:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  web:
+    <<: *app-build
+    container_name: webhook_web
+    command: ["/app/scripts/start-web.sh"]
+    environment:
+      <<: *app-env
+      SEED_DEMO: ${SEED_DEMO:-1}
+      # A login for the demo review console at /admin/. This compose file is a
+      # demo stack — it also ships an insecure default SECRET_KEY — and these
+      # credentials belong nowhere else. Set DEMO_ADMIN_PASSWORD="" to create
+      # no account.
+      DEMO_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-demo}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-demo-password}
+    ports:
+      - "8100:8000"
+
+  # The default lane: live traffic from every vendor behaving normally.
+  celery_worker:
+    <<: *app-build
+    container_name: webhook_worker
+    command: ["/app/scripts/start-worker.sh"]
+    environment:
+      <<: *app-env
+      WORKER_QUEUES: normalization
+      WORKER_NAME: live
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d live@$$(hostname) >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # The bulkhead: one vendor's burst is routed here so it cannot monopolise
+  # the lane every other vendor is waiting on. Deliberately smaller.
+  celery_bulk_worker:
+    <<: *app-build
+    container_name: webhook_bulk_worker
+    command: ["/app/scripts/start-worker.sh"]
+    environment:
+      <<: *app-env
+      WORKER_QUEUES: normalization.bulk
+      WORKER_NAME: bulk
+      WORKER_CONCURRENCY: ${BULK_WORKER_CONCURRENCY:-2}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d bulk@$$(hostname) >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  postgres_data:
